@@ -1,10 +1,13 @@
 import bpy
-from . import auth
-from . import drive
+import os
 import threading
 import http
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 import webbrowser
+
+from . import auth
+from . import drive
+from . import backup
 
 bl_info = {
     "name": "DriveSnapshot",
@@ -46,6 +49,7 @@ class GoogleDrivePreferences(bpy.types.AddonPreferences):
 
         # Display the login state and the button based on whether the user is logged in
         if prefs.is_logged_in:
+            layout.operator("custom.backup", text="Backup Blender Configuration")
             layout.label(text=f"Logged in as: {prefs.logged_in_username}")
             layout.operator("custom.logout", text="Logout")
         else:
@@ -168,6 +172,26 @@ def stop_server():
         httpd_server.stop_server()
         httpd_server = None
 
+
+class BackupOperator(bpy.types.Operator):
+    """Operator to handle Blender configuration backup."""
+    bl_idname = "custom.backup"
+    bl_label = "Backup Blender Configuration"
+
+    def execute(self, context):
+        try:
+            dowloads_folder = os.path.expanduser("~/Downloads")
+            backup_dir = os.path.join(dowloads_folder, "blender_backups")
+            
+            backup_file = backup.create_backup(backup_dir)
+            access_token = bpy.context.preferences.addons[__name__].preferences.access_token
+            drive.start_backup_upload(access_token, backup_file)
+            self.report({'INFO'}, f"Backup created: {backup_file}")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to create backup: {str(e)}")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
 # Register and unregister functions for the addon
 def register():
     bpy.utils.register_class(GoogleDrivePreferences)
@@ -175,6 +199,7 @@ def register():
     bpy.utils.register_class(OAuthTokenExchangeOperator)
     bpy.app.handlers.load_post.append(stop_server)
     bpy.utils.register_class(LogoutOperator)
+    bpy.utils.register_class(BackupOperator)
 
 def unregister():
     bpy.utils.unregister_class(GoogleDrivePreferences)
@@ -182,6 +207,7 @@ def unregister():
     bpy.utils.unregister_class(OAuthTokenExchangeOperator)
     bpy.app.handlers.save_pre.remove(stop_server)
     bpy.utils.unregister_class(LogoutOperator)
+    bpy.utils.unregister_class(BackupOperator)
 
 if __name__ == "__main__":
     register()
