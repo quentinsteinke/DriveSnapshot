@@ -42,6 +42,22 @@ class GoogleDrivePreferences(bpy.types.AddonPreferences):
     access_token: bpy.props.StringProperty(default="")
     refresh_token: bpy.props.StringProperty(default="")
 
+    # Cached backup files
+    _cached_backup_files = []
+
+    def get_backup_files(self, context):
+        print("Returning backup files from cache")
+        print("Cached backup files:", [(file_id, file_name, "") for file_name, file_id in self._cached_backup_files])
+        return [(file_id, file_name, "") for file_name, file_id in self._cached_backup_files]
+
+    backup_files: bpy.props.EnumProperty(
+        name="Available Backups",
+        description="List of available backup files",
+        items=get_backup_files
+    )
+    
+    selected_backup_file_id: bpy.props.StringProperty()
+
     # UI for the addon preferences
     def draw(self, context):
         layout = self.layout
@@ -50,11 +66,18 @@ class GoogleDrivePreferences(bpy.types.AddonPreferences):
         # Display the login state and the button based on whether the user is logged in
         if prefs.is_logged_in:
             layout.operator("custom.backup", text="Backup Blender Configuration")
+
+            layout.prop(prefs, "backup_files", text="Select Backup")
+            layout.operator("custom.refresh_backup_list", text="Refresh Backup List")
+            # Use the cached backup files for displaying
+            for file_name, file_id in self._cached_backup_files:
+                layout.label(text=file_name)
+            layout.operator("custom.use_snapshot", text="Use this Snapshot")
+
             layout.label(text=f"Logged in as: {prefs.logged_in_username}")
             layout.operator("custom.logout", text="Logout")
         else:
             layout.operator("custom.oauth_login", text="Login with Google")
-
 
 
 # Define a class that can handle stopping the server
@@ -94,6 +117,19 @@ class OAuthLoginOperator(bpy.types.Operator):
     bl_label = "Login with Google"
 
     def execute(self, context):
+        refresh_token = auth.load_refresh_token()
+        if refresh_token:
+            # Attempt to use the refresh token to get a new access token
+            try:
+                new_access_token = auth.refresh_token_flow(refresh_token)
+                # Save the new access token and proceed
+                auth.save_tokens(new_access_token, refresh_token)
+                return {'FINISHED'}
+            except TokenRefreshError:
+                # Refresh token failed, proceed with full login
+                pass
+        
+        # Start the full login process
         prefs = bpy.context.preferences.addons[__name__].preferences
         prefs.code_verifier = auth.create_code_verifier()
         code_challenge = auth.create_code_challenge(prefs.code_verifier)
@@ -151,15 +187,28 @@ class OAuthTokenExchangeOperator(bpy.types.Operator):
             if 'names' in user_profile and len(user_profile['names']) > 0:
                 prefs.logged_in_username = user_profile['names'][0].get('displayName')
                 prefs.is_logged_in = True
+
             else:
                 self.report({'WARNING'}, "Could not retrieve user name.")
-
+                stop_server()
+                return {'CANCELLED'}
+            
             # Inform the user of a successful exchange
             self.report({'INFO'}, "Token exchange successful. You are now logged in.")
         except Exception as e:
             # Handle exceptions during token exchange and report back to the user
             self.report({'ERROR'}, f"Failed to exchange token: {str(e)}")
+            stop_server()
             return {'CANCELLED'}
+        
+        # try:
+        #     # backup_items = GoogleDrivePreferences.get_backup_files(context)
+        #     _ = prefs.backup_files
+        # except Exception as e:
+        #     self.report({'ERROR'}, f"Failed to update backup files: {str(e)}")
+        #     stop_server()
+        #     return {'CANCELLED'}
+        
         finally:
             # Ensure the server is stopped even if the token exchange fails
             stop_server()
@@ -191,6 +240,48 @@ class BackupOperator(bpy.types.Operator):
             self.report({'ERROR'}, f"Failed to create backup: {str(e)}")
             return {'CANCELLED'}
         return {'FINISHED'}
+    
+class RefreshBackupListOperator(bpy.types.Operator):
+    bl_idname = "custom.refresh_backup_list"
+    bl_label = "Refresh Backup List"
+
+    def execute(self, context):
+        prefs = bpy.context.preferences.addons[__name__].preferences
+        if prefs.is_logged_in:
+            try:
+                folder_id = drive.get_folder_id(prefs.access_token, 'blender')
+                backup_files = drive.list_backup_files(prefs.access_token, folder_id)
+                # Update the cached backup files
+                prefs._cached_backup_files = backup_files
+                print("Updated backup files:", prefs._cached_backup_files)
+                # Manually update the EnumProperty
+                bpy.context.window_manager.update_tag()
+                self.report({'INFO'}, "Backup list updated.")
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to update backup list: {str(e)}")
+                return {'CANCELLED'}
+        else:
+            self.report({'ERROR'}, "Not logged in.")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+class UseSnapshotOperator(bpy.types.Operator):
+    """Operator to use the selected snapshot."""
+    bl_idname = "custom.use_snapshot"
+    bl_label = "Use this Snapshot"
+
+    file_id: bpy.props.StringProperty()  # Add a property to store the selected file ID
+
+    def execute(self, context):
+        prefs = bpy.context.preferences.addons[__name__].preferences
+        if prefs.is_logged_in and prefs.selected_backup_file_id:
+            config_folder = backup.get_blender_config_directory()
+            drive.download_and_extract_backup(prefs.access_token, prefs.selected_backup_file_id, config_folder)
+            self.report({'INFO'}, "Snapshot applied successfully.")
+        else:
+            self.report({'ERROR'}, "Not logged in or no snapshot selected.")
+        return {'FINISHED'}
+
 
 # Register and unregister functions for the addon
 def register():
@@ -200,6 +291,8 @@ def register():
     bpy.app.handlers.load_post.append(stop_server)
     bpy.utils.register_class(LogoutOperator)
     bpy.utils.register_class(BackupOperator)
+    bpy.utils.register_class(UseSnapshotOperator)
+    bpy.utils.register_class(RefreshBackupListOperator)
 
 def unregister():
     bpy.utils.unregister_class(GoogleDrivePreferences)
@@ -208,6 +301,8 @@ def unregister():
     bpy.app.handlers.save_pre.remove(stop_server)
     bpy.utils.unregister_class(LogoutOperator)
     bpy.utils.unregister_class(BackupOperator)
+    bpy.utils.unregister_class(UseSnapshotOperator)
+    bpy.utils.unregister_class(RefreshBackupListOperator)
 
 if __name__ == "__main__":
     register()

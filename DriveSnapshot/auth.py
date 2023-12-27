@@ -4,6 +4,8 @@ import secrets
 import requests
 import webbrowser
 from urllib.parse import urlencode
+import os 
+import json
 
 CLIENT_ID = '862789333054-srkm4fonl18ajddi6ct5n22622epfkve.apps.googleusercontent.com'
 
@@ -69,3 +71,31 @@ def handle_oauth_redirect(code_verifier, authorization_code):
     """Handle the OAuth redirect and exchange the code for a token."""
     token_data = exchange_code_for_token(code_verifier, authorization_code)
     return token_data
+
+def save_refresh_token(refresh_token):
+    with open('path_to_refresh_token_file', 'w') as file:
+        json.dump({'refresh_token': refresh_token}, file)
+
+def load_refresh_token():
+    if os.path.exists('path_to_refresh_token_file'):
+        with open('path_to_refresh_token_file', 'r') as file:
+            return json.load(file).get('refresh_token')
+    return None
+
+def refresh_token_flow():
+    """Refresh the access token."""
+    refresh_token = load_refresh_token()
+    if refresh_token is None:
+        print("No refresh token found.")
+        return
+
+    token_url = 'https://oauth2.googleapis.com/token'
+    data = {
+        'client_id': CLIENT_ID,
+        'client_secret': 'client_secret',  # Include client secret
+        'grant_type': 'refresh_token',
+        'refresh_token': refresh_token
+    }
+    response = requests.post(token_url, data=data)
+    response.raise_for_status()
+    return response.json()
